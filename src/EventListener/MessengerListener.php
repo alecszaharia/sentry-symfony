@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace Sentry\SentryBundle\EventListener;
 
-use Sentry\Event;
+use Sentry\Breadcrumb;
 use Sentry\State\HubInterface;
 use Sentry\State\Scope;
+use Sentry\Tracing\SpanContext;
+use Sentry\Tracing\TransactionContext;
 use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
 use Symfony\Component\Messenger\Event\WorkerMessageHandledEvent;
 use Symfony\Component\Messenger\Exception\HandlerFailedException;
@@ -79,12 +81,67 @@ final class MessengerListener
      *
      * @param WorkerMessageHandledEvent $event The event
      */
-    public function handleWorkerMessageHandledEvent(WorkerMessageHandledEvent $event): void
+    public function handleWorkerMessageHandledEvent(WorkerMessageHandledEvent $eventArgs): void
     {
-        // Flush normally happens at shutdown... which only happens in the worker if it is run with a lifecycle limit
-        // such as --time=X or --limit=Y. Flush immediately in a background worker.
-        $this->flushClient();
+        $span = $this->hub->getSpan();
+
+        $this->hub->addBreadcrumb(
+            new Breadcrumb(
+                Breadcrumb::LEVEL_INFO,
+                Breadcrumb::TYPE_DEFAULT,
+                'php',
+                null,
+                [
+                    'memory_get_peak_usage'=>memory_get_peak_usage(true),
+                    'memory_get_usage'=>memory_get_usage(true)
+                ]
+            )
+        );
+
+        if (null !== $span) {
+            $span->finish();
+        }
     }
+
+    public function handleWorkerMessageReceivedEvent(WorkerMessageHandledEvent $eventArgs): void
+    {
+        $currentSpan = $this->hub->getSpan();
+
+        if (null === $currentSpan) {
+            $transactionContext = new TransactionContext();
+            $refClass = new \ReflectionClass($eventArgs->getEnvelope()->getMessage());
+            $transactionContext->setOp('messenger.handle');
+            $transactionContext->setName($refClass->getShortName());
+
+            $span = $this->hub->startTransaction($transactionContext);
+        } else {
+            $spanContext = new SpanContext();
+            $spanContext->setOp('messenger.handle');
+            $spanContext->setDescription('Message: '.get_class($eventArgs->getEnvelope()->getMessage()));
+
+            $span = $currentSpan->startChild($spanContext);
+        }
+
+        $envelope = $eventArgs->getEnvelope();
+        $span->setTags(
+            [
+                'messenger.receiver_name' => $eventArgs->getReceiverName(),
+                'messenger.message_class' => \get_class($envelope->getMessage()),
+            ]
+        );
+
+        /** @var BusNameStamp|null $messageBusStamp */
+        $messageBusStamp = $envelope->last(BusNameStamp::class);
+
+        if (null !== $messageBusStamp) {
+            $span->setTags(['messenger.message_bus'=> $messageBusStamp->getBusName()]);
+        }
+
+        $this->hub->setSpan($span);
+
+    }
+
+
 
     private function flushClient(): void
     {
