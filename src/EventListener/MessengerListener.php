@@ -11,6 +11,7 @@ use Sentry\Tracing\SpanContext;
 use Sentry\Tracing\TransactionContext;
 use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
 use Symfony\Component\Messenger\Event\WorkerMessageHandledEvent;
+use Symfony\Component\Messenger\Event\WorkerMessageReceivedEvent;
 use Symfony\Component\Messenger\Exception\HandlerFailedException;
 use Symfony\Component\Messenger\Stamp\BusNameStamp;
 
@@ -71,6 +72,19 @@ final class MessengerListener
             } else {
                 $this->hub->captureException($exception);
             }
+
+            $this->hub->addBreadcrumb(
+                new Breadcrumb(
+                    Breadcrumb::LEVEL_INFO,
+                    Breadcrumb::TYPE_DEFAULT,
+                    'php',
+                    null,
+                    [
+                        'memory_get_peak_usage'=>memory_get_peak_usage(true),
+                        'memory_get_usage'=>memory_get_usage(true)
+                    ]
+                )
+            );
         });
 
         $this->flushClient();
@@ -103,7 +117,7 @@ final class MessengerListener
         }
     }
 
-    public function handleWorkerMessageReceivedEvent(WorkerMessageHandledEvent $eventArgs): void
+    public function handleWorkerMessageReceivedEvent(WorkerMessageReceivedEvent $eventArgs): void
     {
         $currentSpan = $this->hub->getSpan();
 
